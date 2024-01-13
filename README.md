@@ -1,6 +1,6 @@
 # AppJail.setup
 
-AppJail.setup - POSIX shell script to easily configure AppJail interactively.
+**AppJail.setup** - POSIX shell script to easily configure AppJail interactively.
 
 ## How to use this script?
 
