@@ -486,6 +486,7 @@ install_overlord()
     run_cmd sysrc beanstalkd_enable=YES
 
     if ! service beanstalkd status; then
+        info "Starting beanstalkd"
         run_cmd service beanstalkd start
     fi
 
@@ -1215,7 +1216,9 @@ enable_dns()
 
     info "Starting appjail-dns"
     run_cmd sysrc appjail_dns_enable=YES
-    run_cmd service appjail-dns start
+    if ! service appjail-dns status; then
+        run_cmd service appjail-dns start
+    fi
 }
 
 write_resolv_conf()
