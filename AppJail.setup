@@ -1,0 +1,1705 @@
+#!/bin/sh
+
+set -o pipefail
+
+# Misc
+EX_USAGE=64
+EX_SOFTWARE=70
+ME=`basename -- "$0"` || exit $?
+LAST_PID=
+ETCDIR="/usr/local/etc/appjail"
+APPJAIL_CONF="${ETCDIR}/appjail.conf"
+DNSMASQ_CONF="${ETCDIR}/dnsmasq.conf"
+TAP_IFACE="tap99"
+LO_IFACE="lo99"
+APPJAIL_TMPDIR="/usr/local/appjail/cache/tmp/.appjail"
+DEFAULT_APPJAIL_NETWORK="ajnet"
+EXAMPLESDIR="/usr/local/share/examples/appjail"
+RESOLV_CONF="${ETCDIR}/resolv.conf"
+HOOKSDIR="${ETCDIR}/hooks"
+if [ `uname -K` -lt 1500000 ]; then
+    FREEBSD_VERSION=`freebsd-version | grep -Eo '[0-9]+\.[0-9]+-[a-zA-Z0-9]+'` || exit $?
+    ENABLE_PKGBASE=false
+else
+    _freebsd_version=`freebsd-version -k` || exit $?
+    FREEBSD_VERSION=`printf "%s" "${_freebsd_version}" | grep -Eo '^[0-9]+'` || exit $?
+    unset _freebsd_version
+    ENABLE_PKGBASE=true
+fi
+DOAS_CONF="/usr/local/etc/doas.conf"
+# Options
+APPSDIR="/root/applications"
+ZPOOL="zroot"
+ZROOTFS="appjail"
+DNS_IFACE="ajdns"
+DNS_ADDR="172.16.0.1"
+LOOPBACK_IFACE="appjail0"
+SSH_PORT="22"
+DRY_RUN=false
+BLEEDING_EDGE=false
+ENABLE_DNS=false
+INSTALL_DEBOOTSTRAP=false
+WITH_DIRECTOR=false
+WITH_OVERLORD=false
+WITH_REPRODUCE=false
+ENABLE_HEALTHCHECKERS=false
+ENABLE_VIRTUALNET=false
+USE_PF_MINIMAL=false
+ENABLE_LOOPBACK_IFACE=false
+ENABLE_TMPFS=false
+ENABLE_DEBUG=false
+ENABLE_RACCT=false
+ENABLE_TRUSTED_USERS=false
+ENABLE_HOOKS=false
+INSTALL_GIT=false
+INSTALL_OCI_DEPENDENCIES=false
+INSTALL_X11_DEPENDENCIES=false
+INSTALL_RAGE=false
+ENABLE_ZFS=false
+EXT_IF=`route -n4 get default 2> /dev/null | grep 'interface:' | cut -d' ' -f4-`
+if [ -z "${EXT_IF}" ]; then
+    EXT_IF=`route -n6 get default 2> /dev/null | grep 'interface:' | cut -d' ' -f4-`
+fi
+VIRTUALNET_ADDR="10.0.0.0/10"
+OVERWRITE_PF_RULES=false
+OVERWRITE_RESOLV_CONF=false
+OVERWRITE_DIRECTOR_INI=false
+OVERWRITE_OVERLORD_YML=false
+MEMCACHED_MAX_ITEM_SIZE=6m
+
+main()
+{
+    if ! iam_root; then
+        err "You need to be root to use this script."
+        return 1
+    fi
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help)
+                help; return 0 ;;
+            --appsdir)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                APPSDIR="$2"
+                shift
+                ;;
+            --zpool)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                ZPOOL="$2"
+                shift
+                ;;
+            --zrootfs)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                ZROOTFS="$2"
+                shift
+                ;;
+            --ext-if)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                EXT_IF="$2"
+                shift
+                ;;
+            --virtualnet-addr)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                VIRTUALNET_ADDR="$2"
+                shift
+                ;;
+            --dns-iface)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                DNS_IFACE="$2"
+                shift
+                ;;
+            --dns-addr)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                DNS_ADDR="$2"
+                shift
+                ;;
+            --loopback-iface)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                LOOPBACK_IFACE="$2"
+                shift
+                ;;
+            --ssh-port)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                SSH_PORT="$2"
+                shift
+                ;;
+            --memcached-max-item-size)
+                if [ "$2" = "" ]; then
+                    usage
+                    return ${EX_USAGE}
+                fi
+
+                MEMCACHED_MAX_ITEM_SIZE="$2"
+                shift
+                ;;
+            --dry-run) DRY_RUN=true ;;
+            --bleeding-edge) BLEEDING_EDGE=true ;;
+            --enable-dns) ENABLE_DNS=true ;;
+            --with-director) WITH_DIRECTOR=true ;;
+            --with-overlord) WITH_OVERLORD=true ;;
+            --with-reproduce) WITH_REPRODUCE=true ;;
+            --enable-healthcheckers) ENABLE_HEALTHCHECKERS=true ;;
+            --enable-virtualnet) ENABLE_VIRTUALNET=true ;;
+            --use-pf-minimal) USE_PF_MINIMAL=true ;;
+            --enable-loopback-iface) ENABLE_LOOPBACK_IFACE=true ;;
+            --enable-tmpfs) ENABLE_TMPFS=true ;;
+            --enable-debug) ENABLE_DEBUG=true ;;
+            --enable-racct) ENABLE_RACCT=true ;;
+            --enable-trusted-users) ENABLE_TRUSTED_USERS=true ;;
+            --enable-hooks) ENABLE_HOOKS=true ;;
+            --install-git) INSTALL_GIT=true ;;
+            --install-debootstrap) INSTALL_DEBOOTSTRAP=true ;;
+            --install-oci-dependencies) INSTALL_OCI_DEPENDENCIES=true ;;
+            --install-x11-dependencies) INSTALL_X11_DEPENDENCIES=true ;;
+            --install-rage) INSTALL_RAGE=true ;;
+            --enable-zfs) ENABLE_ZFS=true ;;
+            --overwrite-pf-rules) OVERWRITE_PF_RULES=true ;;
+            --overwrite-resolv-conf) OVERWRITE_RESOLV_CONF=true ;;
+            --overwrite-director-ini) OVERWRITE_DIRECTOR_INI=true ;;
+            --overwrite-overlord-yml) OVERWRITE_OVERLORD_YML=true ;;
+            --enable-common)
+                ENABLE_DNS=true
+                WITH_DIRECTOR=true
+                ENABLE_HEALTHCHECKERS=true
+                ENABLE_VIRTUALNET=true
+                ENABLE_LOOPBACK_IFACE=true
+                ENABLE_TMPFS=true
+                ENABLE_RACCT=true
+                ENABLE_TRUSTED_USERS=true
+                ENABLE_HOOKS=true
+                INSTALL_GIT=true
+                INSTALL_DEBOOTSTRAP=true
+                INSTALL_OCI_DEPENDENCIES=true
+                INSTALL_RAGE=true
+                ;;
+            *)
+                err "'$1' is invalid. Use '--help' to see a list of all available options."
+                return ${EX_USAGE}
+                ;;
+        esac
+        shift
+    done
+
+    trap clean_exit SIGTERM SIGQUIT SIGINT SIGHUP
+
+    run_setup
+}
+
+iam_root()
+{
+    test `id -u` -eq 0
+}
+
+clean_exit()
+{
+    if [ -n "${LAST_PID}" ]; then
+        kill -s SIGTERM "${LAST_PID}" 2> /dev/null
+        LAST_PID=
+    fi
+    exit ${EX_SOFTWARE}
+}
+
+run_setup()
+{
+    install_appjail
+
+    if [ -f "${APPJAIL_CONF}" ]; then
+        debug "Creating a backup of your appjail.conf(5) file"
+
+        if [ -f "${APPJAIL_CONF}.bak" ]; then
+            warn "'${APPJAIL_CONF}.bak' already exists."
+            run_cmd rm -f "${APPJAIL_CONF}"
+        else
+            run_cmd mv -v "${APPJAIL_CONF}" "${APPJAIL_CONF}.bak"
+        fi
+    fi
+
+    debug "Creating appjail.conf(5)"
+
+    run_cmd mkdir -p "${ETCDIR}"
+
+    if ! write_template_conf | write_conf "${APPJAIL_CONF}"; then
+        err "An error occurred while creating appjail.conf(5) file."
+        return 1
+    fi
+
+    debug "Initializing AppJail"
+    # This will create datasets and directories.
+    run_cmd appjail version
+
+    if ${ENABLE_DNS}; then
+        if ! enable_dns; then
+            err "Failure while configuring DNS."
+            return 1
+        fi
+    fi
+
+    if ${INSTALL_DEBOOTSTRAP}; then
+        install_debootstrap
+    fi
+
+    if ${ENABLE_LOOPBACK_IFACE}; then
+        if ! enable_loopback_iface; then
+            err "Failure while configuring loopback interface."
+            return 1
+        fi
+    fi
+
+    if ${ENABLE_TMPFS}; then
+        if ! enable_tmpfs; then
+            err "Failure while configuring tmpfs(4)."
+            return 1
+        fi
+    fi
+
+    if ${INSTALL_OCI_DEPENDENCIES}; then
+        install_oci_dependencies
+    fi
+
+    if ${INSTALL_GIT}; then
+        install_git
+    fi
+
+    if ${ENABLE_VIRTUALNET}; then
+        if ! enable_virtualnet; then
+            err "Failure while configuring the default virtual network."
+            return 1
+        fi
+    fi
+
+    if ${ENABLE_HOOKS}; then
+        enable_hooks
+    fi
+
+    if ${ENABLE_HEALTHCHECKERS}; then
+        enable_healthcheckers
+    fi
+
+    if ${ENABLE_TRUSTED_USERS}; then
+        if ! enable_trusted_users; then
+            err "Failure while configuring trusted users."
+            return 1
+        fi
+    fi
+
+    if ${INSTALL_RAGE}; then
+        install_rage
+    fi
+
+    if ${INSTALL_X11_DEPENDENCIES}; then
+        install_x11_dependencies
+    fi
+
+    if ${ENABLE_RACCT}; then
+        enable_racct
+    fi
+
+    debug "Bootstrapping base"
+    if ${ENABLE_PKGBASE}; then
+        run_cmd appjail fetch pkgbase -v "${FREEBSD_VERSION}"
+    else
+        run_cmd appjail fetch www -v "${FREEBSD_VERSION}"
+    fi
+    info "Updating base"
+    run_cmd env PAGER=cat appjail update release -v "${FREEBSD_VERSION}"
+
+    if ${WITH_DIRECTOR}; then
+        if ! install_director; then
+            err "Failure while installing and configuring Director."
+            return 1
+        fi
+    fi
+
+    if ${WITH_OVERLORD}; then
+        if ! install_overlord; then
+            err "Failure while installing and configuring Overlord."
+            return 1
+        fi
+    fi
+
+    if ${WITH_REPRODUCE}; then
+        if ! install_reproduce; then
+            err "Failure while installing and configuring Reproduce."
+            return 1
+        fi
+    fi
+
+    debug "Done."
+
+    return 0
+}
+
+install_director()
+{
+    local etcdir
+    local director_ini
+    local director_ini_fallback="${ETCDIR}/director.ini"
+
+    debug "Bootstrapping Director"
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/director" ]; then
+        director_ini="/opt/pipx/venvs/director/etc/director.ini"
+
+        install_director_git
+    else
+        director_ini="/usr/local/etc/director.ini"
+
+        install_director_pkg
+    fi
+
+    etcdir=`dirname "${director_ini}"` || return $?
+
+    run_cmd mkdir -p "${etcdir}"
+
+    if [ -s "${director_ini}" ] && ! ${OVERWRITE_DIRECTOR_INI}; then
+        warn "An existing director.ini file has been detected."
+        warn "Generally, this isn't an issue, but it will be installed as"
+        warn "'${director_ini_fallback}'."
+        warn "You can overwrite your current director.ini file by running the"
+        warn "following commands:"
+        warn "  $ cp ${director_ini_fallback} ${director_ini}"
+        warn "Alternatively, you can use '--overwrite-director-ini' but be sure to"
+        warn "read the description provided by '--help' before using it blindly."
+
+        director_ini="${director_ini_fallback}"
+    fi
+
+    run_cmd rm -f "${director_ini}"
+
+    if ! write_director_ini | write_conf "${director_ini}"; then
+        err "An error occurred while creating director.ini file."
+        return 1
+    fi
+}
+
+write_director_ini()
+{
+    cat << EOF
+[commands]
+timeout=28800
+EOF
+}
+
+install_director_git()
+{
+    pkg_ins devel/py-pipx
+
+    if pkg info -e sysutils/py-director; then
+        pkg_unins sysutils/py-director
+    fi
+
+    git_ins "director"
+}
+
+install_director_pkg()
+{
+    pkg_ins "sysutils/py-director"
+}
+
+install_overlord()
+{
+    local supervisor_conf
+    local overlord_yml="/usr/local/etc/overlord.yml"
+    local overlord_yml_fallback="${ETCDIR}/overlord.yml"
+
+    debug "Bootstrapping Overlord"
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/overlord" ]; then
+        install_overlord_git
+    else
+        install_overlord_pkg
+    fi
+
+    if [ -s "${overlord_yml}" ] && ! ${OVERWRITE_OVERLORD_YML}; then
+        warn "An existing overlord.yml file has been detected."
+        warn "Generally, this isn't an issue, but it will be installed as"
+        warn "'${overlord_yml_fallback}'."
+        warn "You can overwrite your current overlord.yml file by running the"
+        warn "following commands:"
+        warn "  $ cp ${overlord_yml_fallback} ${overlord_yml}"
+        warn "Alternatively, you can use '--overwrite-overlord-yml' but be sure to"
+        warn "read the description provided by '--help' before using it blindly."
+
+        overlord_yml="${overlord_yml_fallback}"
+    fi
+
+    run_cmd rm -f "${overlord_yml}"
+
+    if ! write_overlord_yml | write_conf "${overlord_yml}"; then
+        err "An error occurred while creating overlord.yml file."
+        return 1
+    fi
+
+    info "Bootstrapping Overlord dependencies"
+
+    pkg_ins sysutils/py-supervisor
+    pkg_ins memcached
+    pkg_ins beanstalkd
+    pkg_ins initool
+
+    info "Configuring memcached"
+    run_cmd sysrc memcached_enable=YES
+    run_cmd sysrc memcached_flags="-I${MEMCACHED_MAX_ITEM_SIZE}"
+
+    if ! service memcached status; then
+        info "Starting memcached"
+        run_cmd service memcached start
+    fi
+
+    info "Configuring beanstalkd"
+    run_cmd sysrc beanstalkd_enable=YES
+
+    if ! service beanstalkd status; then
+        run_cmd service beanstalkd start
+    fi
+
+    info "Configuring supervisord"
+
+    supervisor_conf=`mktemp -t appjail-setup` || return $?
+
+    if [ ! -f "/usr/local/etc/supervisord.conf" ] && [ -f "/usr/local/etc/supervisord.conf.sample" ]; then
+        run_cmd cp -v "/usr/local/etc/supervisord.conf.sample" \
+            "/usr/local/etc/supervisord.conf"
+    fi
+
+    if [ ! -f "/usr/local/etc/supervisord.conf" ]; then
+        err "No supervisord.conf found. Cannot continue."
+        return 1
+    fi
+
+    if ! initool set "/usr/local/etc/supervisord.conf" include files "supervisord.d/*.ini" | write_conf "${supervisor_conf}"; then
+        err "An error occurred while editing supervisord.conf file."
+        return 1
+    fi
+
+    run_cmd mv -v "${supervisor_conf}" "/usr/local/etc/supervisord.conf"
+
+    run_cmd mkdir -p /usr/local/etc/supervisord.d
+
+    run_cmd rm -f /usr/local/etc/supervisord.d/overlord.ini
+
+    if ! write_overlord_ini | write_conf "/usr/local/etc/supervisord.d/overlord.ini"; then
+        err "An error occurred while creating supervisord.d/overlord.ini file."
+        return 1
+    fi
+
+    run_cmd mkdir -p /var/log/overlord
+
+    run_cmd sysrc supervisord_enable=YES
+
+    if ! service supervisord status; then
+        info "Starting supervisord"
+        run_cmd service supervisord start
+    fi
+
+    info "Applying changes to supervisord"
+    run_cmd supervisorctl update
+
+    info "Restarting process group"
+    run_cmd supervisorctl restart overlord:
+}
+
+install_overlord_git()
+{
+    pkg_ins devel/py-pipx
+
+    if pkg info -e sysutils/py-overlord; then
+        pkg_unins sysutils/py-overlord
+    fi
+
+    git_ins "overlord"
+}
+
+install_overlord_pkg()
+{
+    pkg_ins sysutils/py-overlord
+}
+
+write_overlord_ini()
+{
+    cat << EOF
+[group:overlord]
+programs=overlord-watch-projects,overlord-watch-vm,overlord-poll-jails,overlord-poll-jail-info,overlord-poll-jail-stats,overlord-poll-jail-extras,overlord-poll-projects,overlord-poll-project-info,overlord-poll-autoscale,overlord-serve,overlord-poll-heartbeat
+
+[program:overlord-watch-commands]
+command=/usr/local/bin/overlord watch-commands
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-watch-projects]
+command=/usr/local/bin/overlord watch-projects
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-watch-vm]
+command=/usr/local/bin/overlord watch-vm
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-jails]
+command=/usr/local/bin/overlord poll-jails
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-jail-info]
+command=/usr/local/bin/overlord poll-jail-info
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-jail-stats]
+command=/usr/local/bin/overlord poll-jail-stats
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-jail-extras]
+command=/usr/local/bin/overlord poll-jail-extras
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-projects]
+command=/usr/local/bin/overlord poll-projects
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-project-info]
+command=/usr/local/bin/overlord poll-project-info
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-autoscale]
+command=/usr/local/bin/overlord poll-autoscale
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-poll-heartbeat]
+command=/usr/local/bin/overlord poll-heartbeat
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+
+[program:overlord-serve]
+command=/usr/local/bin/overlord serve
+autorestart=false
+redirect_stderr=true
+stdout_logfile=/var/log/overlord/%(program_name)s.log
+environment=OVERLORD_CONFIG=/usr/local/etc/overlord.yml,PATH="%(ENV_PATH)s:/usr/local/bin",HOME=/root,USER=root
+stopasgroup=true
+EOF
+}
+
+write_overlord_yml()
+{
+    cat << EOF
+port: 8888
+polling:
+  heartbeat: 10
+log_config:
+  version: 1
+  formatters:
+    standard:
+      format: 'PID:%(process)d - %(levelname)s (%(name)s): [%(asctime)s] - %(module)s:%(funcName)s:%(lineno)d: %(message)s'
+  handlers:
+    default:
+      level: 'DEBUG'
+      formatter: 'standard'
+      class: 'logging.StreamHandler'
+      stream: 'ext://sys.stdout'
+  loggers:
+    'overlord.director':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.jail':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.queue':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.client':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.etcd':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.logs':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.tornado':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.info':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.apply':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.serve':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.watch':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.poll':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.destroy':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.commands.spec':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.vm':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.util':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.dataplaneapi':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+    'overlord.libexec.create':
+      handlers: ['default']
+      level: 'INFO'
+      propagate: false
+EOF
+}
+
+install_reproduce()
+{
+    debug "Bootstrapping Reproduce"
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/reproduce" ]; then
+        install_reproduce_git
+    else
+        install_reproduce_pkg
+    fi
+}
+
+install_reproduce_git()
+{
+    if pkg info -e reproduce; then
+        pkg_unins reproduce
+    fi
+
+    git_ins reproduce
+}
+
+install_reproduce_pkg()
+{
+    pkg_ins reproduce
+}
+
+enable_racct()
+{
+    if ! grep -qsE '^[[:space:]]*kern\.racct\.enable[[:space:]]*=' /boot/loader.conf; then
+        debug "Enabling RACCT"
+        echo 'kern.racct.enable=1' | write_conf /boot/loader.conf || return $?
+        warn "Reboot your system for changes take effect!"
+    fi
+}
+
+install_x11_dependencies()
+{
+    if pkg info -e su-exec; then
+        pkg_ins su-exec
+    elif pkg info -e su-exec-static; then
+        pkg_ins su-exec-static
+    else
+        pkg_ins su-exec-static
+    fi
+    pkg_ins xauth
+    pkg_ins xdotool
+    if pkg info -e xephyr; then
+        pkg_ins xephyr
+    elif pkg info -e xlibre-ephyr; then
+        pkg_ins xlibre-ephyr
+    else
+        pkg_ins xephyr
+    fi
+    pkg_ins xev
+    pkg_ins xseticon
+}
+
+install_rage()
+{
+    pkg_ins rage-encryption
+}
+
+enable_trusted_users()
+{
+    local rule
+
+    debug "Configuring trusted users"
+
+    install_doas
+
+    if ! pw groupshow -n appjail > /dev/null 2>&1; then
+        info "Creating 'appjail' group"
+
+        run_cmd pw groupadd -n appjail
+
+        warn "Add your user to 'appjail' group using the following command:"
+        warn "  $ pw groupmod -n appjail -m \"\$USER\""
+        warn "Where \$USER is your username."
+        warn "For these changes to take effect, you must log back into the system"
+        warn "if you are adding yourself."
+    fi
+
+    info "Configuring doas.conf(5)"
+
+    rule="permit nopass keepenv :appjail as root cmd appjail"
+
+    if ! grep -qsE "${rule}" "${DOAS_CONF}"; then
+        echo "${rule}" | write_conf "${DOAS_CONF}" || return $?
+    fi
+
+    rule="permit nopass keepenv :appjail as root cmd appjail-config"
+
+    if ! grep -qsE "${rule}" "${DOAS_CONF}"; then
+        echo "${rule}" | write_conf "${DOAS_CONF}" || return $?
+    fi
+}
+
+install_doas()
+{
+    pkg_ins doas
+}
+
+enable_healthcheckers()
+{
+    debug "Configuring appjail-health"
+
+    run_cmd sysrc appjail_health_enable=YES
+}
+
+enable_virtualnet()
+{
+    local networks=
+    local network
+    local already=false
+    local pf_rules
+    local pf_rules_fallback="${ETCDIR}/pf.conf"
+    local start_pf=false
+
+    debug "Configuring Virtual Network"
+    
+    if ! ${DRY_RUN}; then
+        networks=`appjail network list -H name` || return $?
+    fi
+
+    for network in ${networks}; do
+        if [ "${network}" = "${DEFAULT_APPJAIL_NETWORK}" ]; then
+            already=true
+            break
+        fi
+    done
+
+    if ! ${already}; then
+        info "Creating default virtual network"
+        run_cmd appjail network auto-create
+    fi
+
+    info "Configuring IPv4 forwarding"
+    run_cmd sysrc gateway_enable=YES
+    run_cmd sysctl net.inet.ip.forwarding=1
+
+    info "Loading if_bridge kld"
+    run_cmd sysrc -f /boot/loader.conf if_bridge_load=YES
+    run_cmd kldload -n if_bridge
+
+    info "Loading bridgestp kld"
+    run_cmd sysrc -f /boot/loader.conf bridgestp_load=YES
+    run_cmd kldload -n bridgestp
+
+    info "Configuring bridge filtering"
+    if ! grep -qsE '^[[:space:]]*net\.link\.bridge\.pfil_bridge[[:space:]]*=' /etc/sysctl.conf; then
+        echo 'net.link.bridge.pfil_bridge=1' | write_conf /etc/sysctl.conf || return $?
+    fi
+    run_cmd sysctl net.link.bridge.pfil_bridge=1
+    if ! grep -qsE '^[[:space:]]*net\.link\.bridge\.pfil_member[[:space:]]*=' /etc/sysctl.conf; then
+        echo 'net.link.bridge.pfil_member=1' | write_conf /etc/sysctl.conf || return $?
+    fi
+    run_cmd sysctl net.link.bridge.pfil_member=1
+
+    info "Configuring pf"
+
+    run_cmd sysrc pflog_enable=YES
+
+    if ! service pflog status; then
+        run_cmd service pflog start
+    fi
+
+    pf_rules=`sysrc -n pf_rules` || return $?
+    pf_rules="${pf_rules:-/etc/pf.conf}"
+
+    if [ -s "${pf_rules}" ] && ! ${OVERWRITE_PF_RULES}; then
+        warn "An existing pf.conf(5) file has been detected: ${pf_rules}."
+        warn "pf(4) rules could not be merged in this way, so they will be saved"
+        warn "as ${pf_rules_fallback}."
+        warn "Please merge '${pf_rules_fallback}' with '${pf_rules}',"
+        warn "and then run the following commands:"
+        warn "  $ sysrc pf_enable=YES"
+        warn "  $ service pf start"
+        warn "Alternatively, you can use '--overwrite-pf-rules' but be sure to"
+        warn "read the description provided by '--help' before using it blindly."
+
+        pf_rules="${pf_rules_fallback}"
+    else
+        start_pf=true
+    fi
+
+    run_cmd rm -f "${pf_rules}"
+
+    if ${USE_PF_MINIMAL}; then
+        info "Configuring pf.conf(5) (minimal)"
+        write_pf_minimal | write_conf "${pf_rules}" || return $?
+    else
+        info "Configuring pf.conf(5)"
+        write_pf | write_conf "${pf_rules}" || return $?
+
+        enable_hooks
+
+        info "Installing security-group hook"
+        run_cmd cp -v "${EXAMPLESDIR}/hooks/pre.d/security-group.sh" \
+            "${HOOKSDIR}/pre.d/security-group.sh"
+        info "Installing security-table hook"
+        run_cmd cp -v "${EXAMPLESDIR}/hooks/pre.d/security-table.sh" \
+            "${HOOKSDIR}/pre.d/security-table.sh"
+    fi
+
+    if ! ${start_pf}; then
+        return 0
+    fi
+
+    run_cmd sysrc pf_enable=YES
+
+    if service pf status; then
+        info "Reloading"
+        run_cmd service pf reload
+    else
+        info "Starting"
+        run_cmd service pf start
+    fi
+}
+
+enable_hooks()
+{
+    run_cmd mkdir -p "${HOOKSDIR}" "${HOOKSDIR}/pre.d/" "${HOOKSDIR}/post.d/"
+}
+
+write_pf()
+{
+    cat << EOF
+#
+# See below for details.
+#
+table <private-jails> persist
+table <allow-dns> persist
+
+#
+# See https://www.rfc-editor.org/rfc/rfc6890.html
+#
+table <rfc6890> const { 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16          \\
+                        172.16.0.0/12 192.0.0.0/24 192.0.0.0/29 192.0.2.0/24 192.88.99.0/24    \\
+                        192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24            \\
+                        240.0.0.0/4 255.255.255.255/32 }
+
+#
+# Options that may or may not make sense for you.
+#
+set skip on lo
+set block-policy return
+set fail-policy return
+#
+# I use pflog0 when debugging, but as you see below, the \`\`\`log\`\`\` option is not
+# used in any rule.
+#
+set loginterface pflog0
+
+scrub in
+
+#
+# AppJail anchors used by \`\`\`appjail-nat(1)\`\`\` and \`\`\`appjail-expose(1)\`\`\`.
+#
+nat-anchor "appjail-nat/jail/*"
+nat-anchor "appjail-nat/network/*"
+rdr-anchor "appjail-rdr/*"
+
+antispoof for lo0
+
+#
+# Strictest environments may block all traffic, but this further complicates
+# our ruleset and does not meet my needs or, probably, those of most people.
+#
+block in
+pass out
+pass in proto { icmp, icmp6 }
+
+#
+# This is not necessary, since in the previous rule we are already blocking all
+# incoming traffic on all interfaces, but it is useful to have the following rule,
+# since we can copy-paste it into other hosts that do not block all incoming packets,
+# but want to block all incoming packets for jails.
+#
+# Please note that \`\`\`appjail_bridge\`\`\` is an \`\`\`ifconfig(8)\`\`\` group that AppJail
+# automatically adds when creating a bridge for virtual networks.
+#
+block in on appjail_bridge from <rfc6890>
+#
+# This is crucial because with this rule we allow Internet access, but not to other
+# hosts on the same network as the host.
+#
+pass in on appjail_bridge from (appjail_bridge:network) to ! <rfc6890>
+
+# By default, jails can communicate with everything except <rfc6890>. However, if you want to
+# add another layer of security, you can further restrict access to the jails so that you must
+# explicitly define which connections are allowed.
+block in on appjail_bridge from <private-jails> to ! <rfc6890>
+
+# Since jails cannot communicate with private addresses, it is not possible to connect to
+# DNSMasq listening on ${DNS_IFACE}. This is another case where a table is the best way to
+# apply a common rule.
+pass on appjail_bridge proto { tcp, udp } from <allow-dns> to ${DNS_ADDR}/32 port 53
+
+#
+# The anchor used by \`\`\`security-group\`\`\`.
+#
+anchor "appjail-filter/jail/*"
+
+#
+# Enable SSH.
+#
+pass in on ${EXT_IF} proto tcp to (${EXT_IF}:0) port ${SSH_PORT}
+
+#
+# Enable Overlord.
+#
+`${WITH_OVERLORD} || echo -n "#"`pass in on ${EXT_IF} proto tcp to (${EXT_IF}:0) port 8888
+EOF
+}
+
+write_pf_minimal()
+{
+    cat << EOF
+nat-anchor "appjail-nat/jail/*"
+nat-anchor "appjail-nat/network/*"
+rdr-anchor "appjail-rdr/*"
+EOF
+}
+
+install_oci_dependencies()
+{
+    debug "Bootstrapping OCI dependencies"
+
+    pkg_ins buildah
+    pkg_ins jq
+}
+
+enable_tmpfs()
+{
+    debug "Configuring tmpfs"
+
+    if [ ! -f "/etc/fstab" ] || ! cat /etc/fstab |\
+            awk -v target="${APPJAIL_TMPDIR}" '$2 == target {found=1} END {exit !found}'; then
+        echo -e "tmpfs\t${APPJAIL_TMPDIR}\ttmpfs\trw,late\t0\t0" | write_conf /etc/fstab || return $?
+    fi
+
+    if ! mount -p | awk -v target="${APPJAIL_TMPDIR}" '$2 == target {found=1} END {exit !found}'; then
+        run_cmd mount "${APPJAIL_TMPDIR}"
+    fi
+}
+
+enable_loopback_iface()
+{
+    local iface
+    local interfaces
+
+    debug "Configuring loopback interface"
+
+    interfaces=`ifconfig -l` || return $?
+
+    for iface in ${interfaces}; do
+        if [ "${iface}" = "${LOOPBACK_IFACE}" ]; then
+            info "Nothing to do. Loopback interface is ready."
+            return 0
+        fi
+    done
+
+    info "Configuring rc.conf(5)"
+    run_cmd sysrc cloned_interfaces+="${LO_IFACE}"
+    run_cmd sysrc ifconfig_${LO_IFACE}_name="${LOOPBACK_IFACE}"
+
+    info "Creating loopback interface at runtime"
+    run_cmd service netif cloneup "${LO_IFACE}"
+    run_cmd service netif start "${LO_IFACE}"
+    run_cmd service netif start "${LOOPBACK_IFACE}"
+}
+
+install_debootstrap()
+{
+    debug "Bootstrapping debootstrap"
+
+    pkg_ins debootstrap
+}
+
+write_conf()
+{
+    if ${DRY_RUN}; then
+        while IFS= read -r line; do
+            info "+dry-run:$1: ${line}"
+        done
+    else
+        cat >> "$1"
+    fi
+}
+
+enable_dns()
+{
+    local iface
+    local interfaces
+    local already=false
+
+    debug "Configuring DNS"
+
+    interfaces=`ifconfig -l` || return $?
+
+    for iface in ${interfaces}; do
+        if [ "${iface}" = "${DNS_IFACE}" ]; then
+            info "Nothing to do. DNS interface is ready."
+            already=true
+            break
+        fi
+    done
+
+    if ! ${already}; then
+        info "Configuring rc.conf(5)"
+        run_cmd sysrc cloned_interfaces+="${TAP_IFACE}"
+        run_cmd sysrc ifconfig_${TAP_IFACE}_name="${DNS_IFACE}"
+        run_cmd sysrc ifconfig_"${DNS_IFACE}"="inet ${DNS_ADDR}/32"
+
+        info "Creating DNS interface at runtime"
+        run_cmd service netif cloneup "${TAP_IFACE}"
+        run_cmd service netif start "${TAP_IFACE}"
+        run_cmd service netif start "${DNS_IFACE}"
+    fi
+
+    install_dnsmasq
+
+    info "Configuring DNSMasq"
+    run_cmd rm -f "${DNSMASQ_CONF}"
+    if ! write_dnsmasq_conf | write_conf "${DNSMASQ_CONF}"; then
+        err "An error occurred while creating dnsmasq.conf file."
+        return 1
+    fi
+    run_cmd sysrc dnsmasq_conf="${ETCDIR}/dnsmasq.conf"
+    run_cmd sysrc dnsmasq_enable=YES
+    
+    if service dnsmasq status; then
+        info "Reloading"
+        run_cmd service dnsmasq reload
+    else
+        info "Starting"
+        run_cmd service dnsmasq start
+    fi
+
+    info "Creating resolv.conf(5)"
+    run_cmd rm -f "${RESOLV_CONF}"
+    if ! write_resolv_conf | write_conf "${RESOLV_CONF}"; then
+        err "An error occurred while creating a resolv.conf(5)."
+        return 1
+    fi
+
+    if [ -s "/etc/resolv.conf" ] && ! ${OVERWRITE_RESOLV_CONF}; then
+        warn "An existing resolv.conf(5) file has been detected."
+        warn "If you want to resolve jails' IPv4 address using their hostname,"
+        warn "you must use the same name server specified in '${RESOLV_CONF}'."
+        warn "The easiest way is to run the following commands:"
+        warn "  $ chflags noschg /etc/resolv.conf"
+        warn "  $ cp ${RESOLV_CONF} /etc/resolv.conf"
+        warn "  $ chflags schg /etc/resolv.conf"
+        warn "Alternatively, you can use '--overwrite-resolv-conf' but be sure to"
+        warn "read the description provided by '--help' before using it blindly."
+    else
+        run_cmd chflags noschg /etc/resolv.conf
+        run_cmd cp "${RESOLV_CONF}" /etc/resolv.conf
+        run_cmd chflags schg /etc/resolv.conf
+    fi
+
+    info "Starting appjail-dns"
+    run_cmd sysrc appjail_dns_enable=YES
+    run_cmd service appjail-dns start
+}
+
+write_resolv_conf()
+{
+    echo "nameserver ${DNS_ADDR}"
+}
+
+write_dnsmasq_conf()
+{
+    cat << EOF
+addn-hosts=/var/tmp/appjail-hosts
+no-resolv
+server=208.67.222.222
+server=208.67.220.220
+all-servers
+filter-AAAA
+EOF
+}
+
+install_dnsmasq()
+{
+    pkg_ins dnsmasq
+}
+
+write_template_conf()
+{
+    if [ -z "${EXT_IF}" ]; then
+        err "External interface is undefined. Please specify one using '--ext-if'."
+        return 1
+    fi
+
+    cat << EOF
+#
+# Welcome to your AppJail configuration file!
+#
+# Please note that not all parameters are included here, only those that suit most
+# environments, but may not yours.
+#
+# See appjail.conf(5) for a more detailed description of each parameter and
+# appjail-tutorial(7) for recommendations.
+#
+
+#
+# External interface to use. Run \`route -n get default | grep interface\` to find out
+# which interface you are currently using.
+#
+EXT_IF=${EXT_IF}
+
+#
+# If you configure AppJail to use DNS, you may want to create the file below and
+# put the DNS server address in it.
+#
+`${ENABLE_DNS} || echo -n "#"`DEFAULT_RESOLV_CONF=${ETCDIR}/resolv.conf
+#
+# Prefer to use shorter domain names.
+#
+SHORTEN_DOMAIN_NAMES=1
+
+#
+# Default network address to use when implicitly creating a virtual network.
+#
+AUTO_NETWORK_ADDR="${VIRTUALNET_ADDR}"
+
+#
+# Default MTU used by Virtual Networks.
+#
+# See appjail.conf(5) before changing this parameter.
+#
+#DEFAULT_VIRTUALNET_MTU=1500
+
+#
+# Enable ZFS.
+#
+# Please don't enable or disable this parameter after running AppJail.
+# See "BUGS/Don't mix ZFS and non-ZFS file systems!" in appjail-tutorial(7).
+#
+`${ENABLE_ZFS} || echo -n "#"`ENABLE_ZFS=1
+#
+# ZFS pool name to use. Run \`zpool list -o name\` to see what pools you have on
+# your system.
+#
+ZPOOL=${ZPOOL}
+#
+# AppJail will use \${ZPOOL}/\${ZROOTFS} as its root.
+#
+ZROOTFS=${ZROOTFS}
+
+#
+# Disable the debug level.
+#
+ENABLE_DEBUG=`${ENABLE_DEBUG} && echo 1 || echo 0`
+
+#
+# Default architecture and version used by some operations.
+#
+FREEBSD_ARCH=`uname -m`
+FREEBSD_VERSION=${FREEBSD_VERSION}
+
+#
+# Location of the hooks that will be executed before and after the main command is
+# executed. Remember to create \`pre.d/\` and \`post.d/\` directories if you need one
+# or both of them.
+#
+`${ENABLE_HOOKS} || echo -n "#"`HOOKSDIR=${HOOKSDIR}
+
+#
+# Use as many threads as there are CPU cores on the system.
+#
+TAR_XZ_ARGS="--xz --options xz:threads=0"
+TAR_ZSTD_ARGS="--zstd --options zstd:threads=0"
+EOF
+}
+
+install_appjail()
+{
+    debug "Bootstrapping AppJail"
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/AppJail" ]; then
+        install_appjail_git
+    else
+        install_appjail_pkg
+    fi
+
+    run_cmd sysrc appjail_enable=YES
+}
+
+install_appjail_pkg()
+{
+    if ! pkg info -e appjail && ! pkg info -e appjail-devel; then
+        if [ -d "${APPSDIR}/AppJail" ] && which -s appjail; then
+            git_unins AppJail
+        fi
+    fi
+
+    if pkg info -e appjail; then
+        pkg_ins appjail
+    elif pkg info -e appjail-devel; then
+        pkg_ins appjail-devel
+    else
+        pkg_ins appjail
+    fi
+}
+
+git_unins()
+{
+    warn "Uninstalling bleeding-edge version of $1 in 10 seconds"
+    warn "Press CTRL-C to exit."
+    run_cmd sleep 10
+    change_dir "${APPSDIR}/$1"
+    run_cmd make uninstall
+    change_dir "${OLDPWD}"
+}
+
+change_dir()
+{
+    if ${DRY_RUN}; then
+        info "+dry-run: ${PWD} -> $1"
+    else
+        cd -- "$1" || exit $?
+    fi
+}
+
+pkg_ins()
+{
+    if pkg info -e "$1"; then
+        info "Upgrading $1"
+        run_cmd pkg upgrade "$1"
+    else
+        info "Installing $1"
+        run_cmd pkg install -y "$1"
+    fi
+}
+
+install_appjail_git()
+{
+    if pkg info -e appjail; then
+        pkg_unins appjail
+    elif pkg info -e appjail-devel; then
+        pkg_unins appjail-devel
+    fi
+
+    git_ins "AppJail"
+}
+
+pkg_unins()
+{
+    warn "Uninstalling $1 package in 10 seconds"
+    run_cmd sleep 10
+    run_cmd pkg remove -y "$1"
+}
+
+git_ins()
+{
+    create_appsdir
+    install_git
+
+    if [ -d "${APPSDIR}/$1" ]; then
+        debug "Updating $1"
+        run_cmd git -C "${APPSDIR}/$1" pull
+    else
+        debug "Installing $1"
+        run_cmd git -C "${APPSDIR}" clone "https://github.com/DtxdF/$1.git"
+    fi
+
+    change_dir "${APPSDIR}/$1"
+    run_cmd env SUEXEC=command ./make.sh
+    change_dir "${OLDPWD}"
+}
+
+create_appsdir()
+{
+    if [ -d "${APPSDIR}" ]; then
+        return 0
+    fi
+
+    debug "Creating ${APPSDIR}"
+    run_cmd mkdir -p -- "${APPSDIR}"
+}
+
+install_git()
+{
+    if pkg info -e git-tiny; then
+        pkg_ins git-tiny
+    elif pkg info -e git-lite; then
+        pkg_ins git-lite
+    elif pkg info -e git; then
+        pkg_ins git
+    else
+        pkg_ins git-tiny
+    fi
+}
+
+run_cmd()
+{
+    local errlevel
+
+    if ${DRY_RUN}; then
+        info "+dry-run: $*"
+        return 0
+    fi
+
+    info "+ $*"
+
+    "$@" &
+
+    LAST_PID=$!
+
+    wait "${LAST_PID}"
+
+    errlevel=$?
+
+    if [ ${errlevel} -ne 0 ]; then
+        LAST_PID=
+
+        err "-failed: $*"
+        exit ${errlevel}
+    fi
+
+    LAST_PID=
+
+    return 0
+}
+
+help()
+{
+    usage
+    echo >&2
+    cat << EOF >&2
+Description:
+
+  ${ME} is a script for bootstrapping and configuring AppJail and
+  all related projects, such as Overlord, Director, and Reproduce.
+  The purpose of this script is to configure them with secure default
+  settings that have proven effective over the years, as well as to
+  enable the most frequently used features.
+
+  This script attempts to works correctly on an dirty host, but this is
+  merely a best-effort approach. It is preferable to use this script in
+  conjunction with cloud-init/nuageinit in a fresh environment and then
+  tailor the configurations to your needs.
+
+  By default, when no arguments are provided, this script simply
+  installs AppJail and enables its rc(8) script. In almost all cases,
+  you'll want to use the '--enable-common' option, which installs
+  additional dependencies to enable more features and also includes
+  Director for multi-jail deployments.
+
+Options:
+
+  --help
+        Show this help message and exit.
+
+  --appsdir <dir>
+        Directory where application sources (git repositories) will be stored.
+        Default: ${APPSDIR}
+
+  --zpool <pool>
+        ZFS pool name to use for AppJail datasets.
+        Default: ${ZPOOL}
+
+  --zrootfs <fs>
+        ZFS filesystem name under the pool for AppJail.
+        Default: ${ZROOTFS}
+
+  --ext-if <iface>
+        External network interface used for external access (commonly, internet connection).
+        If not specified, it will be auto-detected from the default route.
+
+  --virtualnet-addr <addr>
+        IP address range for the default virtual network (in CIDR notation).
+        Default: ${VIRTUALNET_ADDR}
+
+  --dns-iface <iface>
+        Name of the cloned TAP interface used for DNS services.
+        Default: ${DNS_IFACE}
+
+  --dns-addr <addr>
+        IPv4 address assigned to the DNS interface.
+        Default: ${DNS_ADDR}
+
+  --loopback-iface <iface>
+        Name of the cloned loopback interface for jail networking.
+        Default: ${LOOPBACK_IFACE}
+
+  --ssh-port <port>
+        TCP port used for SSH access from the external network.
+        Default: ${SSH_PORT}
+
+  --memcached-max-item-size <size>
+        Maximum item size for memcached (passed to -I option).
+        Default: ${MEMCACHED_MAX_ITEM_SIZE}
+
+  --dry-run
+        Print all commands that would be executed without actually running them.
+        Useful for previewing the actions.
+
+  --bleeding-edge
+        Install AppJail, Director, Overlord, and Reproduce from Git (development
+        versions) instead of using FreeBSD packages.
+
+  --enable-dns
+        Set up a DNS server (dnsmasq) and configure AppJail to use it.
+        This also creates a tap(4) interface and updates resolv.conf(5).
+
+  --with-director
+        Install and configure Director for multi-jail orchestration.
+
+  --with-overlord
+        Install and configure Overlord along with its dependencies
+        (supervisord, memcached, beanstalkd) for multi-host orchestration.
+
+  --with-reproduce
+        Install Reproduce for building AppJail images.
+
+  --enable-healthcheckers
+        Enable AppJail's health checker service.
+
+  --enable-virtualnet
+        Set up a virtual network infrastructure: enable IP forwarding, load
+        bridge kernel modules, configure PF firewall, and create the default
+        virtual network.
+
+        If '--use-pf-minimal' is not specified, a set of rules will be
+        installed along with the 'security-group' and 'security-table' hooks
+        to restrict and control connections made by the jails by default.
+        Note that, since the DNS server uses a private address, these cannot
+        communicate by default; therefore, you need to add a jail to the
+        'allow-dns' table. It is preferable to do so through the label used
+        by the security table.
+
+        See also: https://github.com/DtxdF/AppJail/wiki/filter
+
+  --use-pf-minimal
+        When combined with --enable-virtualnet, write only minimal PF rules
+        (nat and rdr anchors) instead of the full rule set.
+
+  --enable-loopback-iface
+        Create and configure a cloned loopback interface for jail networking.
+        Commonly used by LinuxJails.
+
+  --enable-tmpfs
+        Mount a tmpfs(4) filesystem on /usr/local/appjail/cache/tmp/.appjail for
+        temporary files (adds entry to /etc/fstab and mounts it).
+
+  --enable-debug
+        Enable debug logging in AppJail's configuration file.
+
+  --enable-racct
+        Enable RACCT (resource accounting) by setting kern.racct.enable=1 in
+        /boot/loader.conf. A reboot is required for this to take effect.
+
+  --enable-trusted-users
+        Configure trusted users: install doas, create the 'appjail' group, and
+        add doas rules to allow members of that group to run appjail commands
+        as root without a password.
+
+  --enable-hooks
+        Enable AppJail's hook system (creates the hook directories).
+
+  --install-git
+        Install a Git client (git-tiny, git-lite, or git) if not already present.
+
+  --install-debootstrap
+        Install debootstrap (used for creating debian-based jails).
+
+  --install-oci-dependencies
+        Install OCI dependencies: buildah and jq.
+
+  --install-x11-dependencies
+        Install x11-related packages (su-exec, xauth, xdotool, xephyr, xev,
+        xseticon) for graphical applications in jails.
+
+  --install-rage
+        Install rage-encryption (used for Secrets).
+
+  --enable-zfs
+        Enable ZFS support in AppJail's configuration.
+
+  --overwrite-pf-rules
+        Overwrite existing PF rules file (/etc/pf.conf or the one defined in
+        rc.conf).
+
+  --overwrite-resolv-conf
+        Overwrite /etc/resolv.conf with AppJail's DNS configuration, even if
+        it already exists.
+
+  --overwrite-director-ini
+        Overwrite existing director.ini file (if present) instead of saving a
+        fallback copy.
+
+  --overwrite-overlord-yml
+        Overwrite existing overlord.yml file (if present) instead of saving a
+        fallback copy.
+
+  --enable-common
+        Enable a common set of options for typical AppJail usage. Equivalent to:
+        --enable-dns --with-director --enable-healthcheckers --enable-virtualnet
+        --enable-loopback-iface --enable-tmpfs --enable-racct --enable-trusted-users
+        --enable-hooks --install-git --install-debootstrap --install-oci-dependencies
+        --install-rage
+
+Caveats:
+
+  1. Keep in mind that, unlike director.ini, overlord.yml, pf.conf,
+     resolv.conf, etc., the appjail.conf file is always overwritten. The
+     first time, your appjail.conf file is renamed with the same name
+     but with the .bak extension; however, the second time, the file
+     with the .bak extension will not be overwritten. If you do not want
+     this to happen, make a copy of your appjail.conf file.
+
+  2. You should use nohup(1) if you are connected via an SSH connection,
+     but it is recommended that you run this script using cloud-init/nuageinit,
+     either physically or through the console of a virtual machine or
+     via VNC. ALWAYS make sure you have a way to physically access the
+     system to troubleshoot any issues.
+
+  3. tap99 and lo99 should not be used, since this script assumes that they are
+     always available for use.
+EOF
+}
+
+usage()
+{
+    echo "usage: ${ME} [options]" >&2
+}
+
+warn()
+{
+    printf "##!> %s\n" "$*" >&2
+}
+
+err()
+{
+    printf "###> %s\n" "$*" >&2
+}
+
+info()
+{
+    printf "===> %s\n" "$*" >&2
+}
+
+debug()
+{
+    printf "======> %s\n" "$*" >&2
+}
+
+main "$@"
