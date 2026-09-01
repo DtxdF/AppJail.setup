@@ -2,6 +2,8 @@
 
 set -o pipefail
 
+export ASSUME_ALWAYS_YES=yes
+
 # Misc
 EX_USAGE=64
 EX_SOFTWARE=70
@@ -1388,7 +1390,7 @@ pkg_ins()
         run_cmd pkg upgrade "$1"
     else
         info "Installing $1"
-        run_cmd pkg install -y "$1"
+        run_cmd pkg install "$1"
     fi
 }
 
@@ -1407,7 +1409,7 @@ pkg_unins()
 {
     warn "Uninstalling $1 package in 10 seconds"
     run_cmd sleep 10
-    run_cmd pkg remove -y "$1"
+    run_cmd pkg remove "$1"
 }
 
 git_ins()
