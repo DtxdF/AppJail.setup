@@ -1387,10 +1387,10 @@ pkg_ins()
 {
     if pkg info -e "$1"; then
         info "Upgrading $1"
-        run_cmd pkg upgrade "$1"
+        run_rcmd pkg upgrade "$1"
     else
         info "Installing $1"
-        run_cmd pkg install "$1"
+        run_rcmd pkg install "$1"
     fi
 }
 
@@ -1409,7 +1409,7 @@ pkg_unins()
 {
     warn "Uninstalling $1 package in 10 seconds"
     run_cmd sleep 10
-    run_cmd pkg remove "$1"
+    run_rcmd pkg remove "$1"
 }
 
 git_ins()
@@ -1465,6 +1465,38 @@ run_cmd()
     info "+ $*"
 
     "$@" &
+
+    LAST_PID=$!
+
+    wait "${LAST_PID}"
+
+    errlevel=$?
+
+    if [ ${errlevel} -ne 0 ]; then
+        LAST_PID=
+
+        err "-failed: $*"
+        exit ${errlevel}
+    fi
+
+    LAST_PID=
+
+    return 0
+}
+
+run_rcmd()
+{
+    local errlevel
+
+    if ${DRY_RUN}; then
+        info "+dry-run: $*"
+        return 0
+    fi
+
+    info "+ $*"
+
+    # See procctl(2) and "IMPLEMENTATION NOTES" in timeout(1).
+    timeout 0 "$@" &
 
     LAST_PID=$!
 
