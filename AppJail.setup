@@ -176,6 +176,7 @@ main()
             --with-director) WITH_DIRECTOR=true ;;
             --with-overlord) WITH_OVERLORD=true ;;
             --with-reproduce) WITH_REPRODUCE=true ;;
+            --with-x11appjail) WITH_X11APPJAIL=true ;;
             --enable-healthcheckers) ENABLE_HEALTHCHECKERS=true ;;
             --enable-virtualnet) ENABLE_VIRTUALNET=true ;;
             --use-pf-minimal) USE_PF_MINIMAL=true ;;
@@ -324,7 +325,9 @@ run_setup()
         install_rage
     fi
 
-    if ${INSTALL_X11_DEPENDENCIES}; then
+    if ${WITH_X11APPJAIL}; then
+        install_x11appjail
+    elif ${INSTALL_X11_DEPENDENCIES}; then
         install_x11_dependencies
     fi
 
@@ -787,6 +790,100 @@ enable_racct()
         echo 'kern.racct.enable=1' | write_conf /boot/loader.conf || return $?
         warn "Reboot your system for changes take effect!"
     fi
+}
+
+install_x11appjail()
+{
+    debug "Bootstrapping x11appjail"
+
+    install_x11_dependencies
+
+    pkg_ins libnotify
+    pkg_ins unixexec
+    pkg_ins desktop-file-utils
+    pkg_ins xdg-utils
+    pkg_ins b3sum
+    pkg_ins zenity4
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/xclipsync" ]; then
+        install_xclipsync_git
+    else
+        install_xclipsync_pkg
+    fi
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/appscript" ]; then
+        install_appscript_git
+    else
+        install_appscript_pkg
+    fi
+
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/x11appjail" ]; then
+        install_x11appjail_git
+    else
+        install_x11appjail_pkg
+    fi
+
+    if ! pw groupshow -n x11appjail > /dev/null 2>&1; then
+        info "Creating 'x11appjail' group"
+
+        run_cmd pw groupadd -n x11appjail
+
+        warn "Add your user to 'x11appjail' group using the following command:"
+        warn "  $ pw groupmod -n x11appjail -m \"\$USER\""
+        warn "Where \$USER is your username."
+        warn "For these changes to take effect, you must log back into the system"
+        warn "if you are adding yourself."
+    fi
+
+    info "Configuring doas.conf(5)"
+
+    rule="permit nopass :x11appjail cmd /usr/local/libexec/x11appjail/map-exec"
+
+    if ! grep -qsE "${rule}" "${DOAS_CONF}"; then
+        echo "${rule}" | write_conf "${DOAS_CONF}" || return $?
+    fi
+}
+
+install_appscript_git()
+{
+    if pkg info -e sysutils/appscript; then
+        pkg_unins sysutils/appscript
+    fi
+
+    git_ins "appscript"
+}
+
+install_appscript_pkg()
+{
+    pkg_ins "sysutils/appscript"
+}
+
+install_xclipsync_git()
+{
+    if pkg info -e sysutils/xclipsync; then
+        pkg_unins sysutils/xclipsync
+    fi
+
+    git_ins "xclipsync"
+}
+
+install_xclipsync_pkg()
+{
+    pkg_ins "sysutils/xclipsync"
+}
+
+install_x11appjail_git()
+{
+    if pkg info -e security/x11appjail; then
+        pkg_unins security/x11appjail
+    fi
+
+    git_ins "x11appjail"
+}
+
+install_director_pkg()
+{
+    pkg_ins "security/x11appjail"
 }
 
 install_x11_dependencies()
@@ -1606,6 +1703,13 @@ Options:
 
   --with-reproduce
         Install Reproduce for building AppJail images.
+
+  --with-x11appjail
+        Install and configure x11appjail for creating, verifying, installing and
+        running AppJails. \`--install-x11-dependencies\` is set implicitly.
+
+        It's recommend to set \`--with-reproduce\` if you want to build AppJail
+        images that later will be used when building AppJails.
 
   --enable-healthcheckers
         Enable AppJail's health checker service.
