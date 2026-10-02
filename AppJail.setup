@@ -817,6 +817,12 @@ install_x11appjail()
         install_appscript_pkg
     fi
 
+    if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/jtransfer" ]; then
+        install_jtransfer_git
+    else
+        install_jtransfer_pkg
+    fi
+
     if ${BLEEDING_EDGE} || [ -d "${APPSDIR}/x11appjail" ]; then
         install_x11appjail_git
     else
@@ -842,6 +848,20 @@ install_x11appjail()
     if ! grep -qsE "${rule}" "${DOAS_CONF}"; then
         echo "${rule}" | write_conf "${DOAS_CONF}" || return $?
     fi
+}
+
+install_jtransfer_git()
+{
+    if pkg info -e sysutils/jtransfer; then
+        pkg_unins sysutils/jtransfer
+    fi
+
+    git_ins "jtransfer"
+}
+
+install_jtransfer_pkg()
+{
+    pkg_ins "sysutils/jtransfer"
 }
 
 install_appscript_git()
