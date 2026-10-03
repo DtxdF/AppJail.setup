@@ -866,8 +866,8 @@ install_jtransfer_pkg()
 
 install_appscript_git()
 {
-    if pkg info -e sysutils/appscript; then
-        pkg_unins sysutils/appscript
+    if pkg info -e archivers/appscript; then
+        pkg_unins archivers/appscript
     fi
 
     git_ins "appscript"
@@ -875,7 +875,7 @@ install_appscript_git()
 
 install_appscript_pkg()
 {
-    pkg_ins "sysutils/appscript"
+    pkg_ins "archivers/appscript"
 }
 
 install_xclipsync_git()
