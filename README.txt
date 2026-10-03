@@ -15,7 +15,7 @@ Description:
 
   By default, when no arguments are provided, this script simply
   installs AppJail and enables its rc(8) script. In almost all cases,
-  you’ll want to use the '--enable-common' option, which installs
+  you'll want to use the '--enable-common' option, which installs
   additional dependencies to enable more features and also includes
   Director for multi-jail deployments.
 
@@ -85,6 +85,13 @@ Options:
 
   --with-reproduce
         Install Reproduce for building AppJail images.
+
+  --with-x11appjail
+        Install and configure x11appjail for creating, verifying, installing and
+        running AppJails. `--install-x11-dependencies` is set implicitly.
+
+        It's recommend to set `--with-reproduce` if you want to build AppJail
+        images that later will be used when building AppJails.
 
   --enable-healthcheckers
         Enable AppJail's health checker service.
@@ -165,6 +172,12 @@ Options:
   --overwrite-overlord-yml
         Overwrite existing overlord.yml file (if present) instead of saving a
         fallback copy.
+
+  --ignore-appjail-conf
+        Avoid overwriting the appjail.conf(5) file if it already exists.
+        This is particularly useful for updates, but it means that
+        subsequent runs of this script will not modify your
+        appjail.conf(5).
 
   --enable-common
         Enable a common set of options for typical AppJail usage. Equivalent to:
