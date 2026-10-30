@@ -922,13 +922,6 @@ install_director_pkg()
 
 install_x11_dependencies()
 {
-    if pkg info -e su-exec; then
-        pkg_ins su-exec
-    elif pkg info -e su-exec-static; then
-        pkg_ins su-exec-static
-    else
-        pkg_ins su-exec-static
-    fi
     pkg_ins xauth
     pkg_ins xdotool
     if pkg info -e xephyr; then
@@ -1800,8 +1793,8 @@ Options:
         Install OCI dependencies: buildah and jq.
 
   --install-x11-dependencies
-        Install x11-related packages (su-exec, xauth, xdotool, xephyr, xev,
-        xseticon) for graphical applications in jails.
+        Install x11-related packages (xauth, xdotool, xephyr, xev, xseticon) for
+        graphical applications in jails.
 
   --install-rage
         Install rage-encryption (used for Secrets).
