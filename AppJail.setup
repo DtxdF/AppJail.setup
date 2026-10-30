@@ -880,11 +880,18 @@ install_jtransfer_pkg()
 
 install_appscript_git()
 {
+    install_signify
+
     if pkg info -e archivers/appscript; then
         pkg_unins archivers/appscript
     fi
 
     git_ins "appscript"
+}
+
+install_signify()
+{
+    pkg_ins signify
 }
 
 install_appscript_pkg()
