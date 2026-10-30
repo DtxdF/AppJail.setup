@@ -809,6 +809,7 @@ install_x11appjail()
 {
     debug "Bootstrapping x11appjail"
 
+    install_doas
     install_x11_dependencies
 
     pkg_ins libnotify
