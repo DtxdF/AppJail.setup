@@ -74,6 +74,7 @@ OVERWRITE_DIRECTOR_INI=false
 OVERWRITE_OVERLORD_YML=false
 MEMCACHED_MAX_ITEM_SIZE=6m
 IGNORE_APPJAIL_CONF=false
+IGNORE_RELEASE=false
 
 main()
 {
@@ -203,6 +204,7 @@ main()
             --overwrite-director-ini) OVERWRITE_DIRECTOR_INI=true ;;
             --overwrite-overlord-yml) OVERWRITE_OVERLORD_YML=true ;;
             --ignore-appjail-conf) IGNORE_APPJAIL_CONF=true ;;
+            --ignore-release) IGNORE_RELEASE=true ;;
             --enable-common)
                 ENABLE_DNS=true
                 WITH_DIRECTOR=true
@@ -344,14 +346,16 @@ run_setup()
         enable_racct
     fi
 
-    debug "Bootstrapping base"
-    if ${ENABLE_PKGBASE}; then
-        run_cmd appjail fetch pkgbase -v "${FREEBSD_VERSION}"
-    else
-        run_cmd appjail fetch www -v "${FREEBSD_VERSION}"
+    if ! ${IGNORE_RELEASE}; then
+        debug "Bootstrapping base"
+        if ${ENABLE_PKGBASE}; then
+            run_cmd appjail fetch pkgbase -v "${FREEBSD_VERSION}"
+        else
+            run_cmd appjail fetch www -v "${FREEBSD_VERSION}"
+        fi
+        info "Updating base"
+        run_cmd env PAGER=cat appjail update release -v "${FREEBSD_VERSION}"
     fi
-    info "Updating base"
-    run_cmd env PAGER=cat appjail update release -v "${FREEBSD_VERSION}"
 
     if ${WITH_DIRECTOR}; then
         if ! install_director; then
@@ -1825,6 +1829,9 @@ Options:
         This is particularly useful for updates, but it means that
         subsequent runs of this script will not modify your
         appjail.conf(5).
+
+  --ignore-release
+        Avoid bootstrapping a base directory and updating an existing one.
 
   --enable-common
         Enable a common set of options for typical AppJail usage. Equivalent to:

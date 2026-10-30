@@ -179,6 +179,9 @@ Options:
         subsequent runs of this script will not modify your
         appjail.conf(5).
 
+  --ignore-release
+        Avoid bootstrapping a base directory and updating an existing one.
+
   --enable-common
         Enable a common set of options for typical AppJail usage. Equivalent to:
         --enable-dns --with-director --enable-healthcheckers --enable-virtualnet
