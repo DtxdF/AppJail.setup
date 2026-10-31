@@ -901,6 +901,9 @@ install_appscript_pkg()
 
 install_xclipsync_git()
 {
+    pkg_ins xclip
+    pkg_ins tk-wrapper
+
     if pkg info -e sysutils/xclipsync; then
         pkg_unins sysutils/xclipsync
     fi
